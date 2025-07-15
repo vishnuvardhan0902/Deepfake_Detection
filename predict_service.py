@@ -8,7 +8,7 @@ from torch import nn
 import numpy as np
 from PIL import Image
 import cv2
-import face_recognition
+# Remove: import face_recognition
 from io import BytesIO
 from typing import Optional
 from fastapi.responses import JSONResponse
@@ -79,20 +79,22 @@ preprocess = transforms.Compose([
     transforms.Normalize(mean, std)
 ])
 
+# Load OpenCV Haar Cascade for face detection
+CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+face_cascade = cv2.CascadeClassifier(CASCADE_PATH)
+
 class PredictionResponse(BaseModel):
     prediction: str
     confidence: float
 
 def extract_face_from_image(image):
-    faces = face_recognition.face_locations(image)
-    if not faces:
+    gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4)
+    if len(faces) == 0:
         return None
-    try:
-        top, right, bottom, left = faces[0]
-        image = image[top:bottom, left:right, :]
-    except:
-        pass
-    return preprocess(image)
+    x, y, w, h = faces[0]
+    face_img = image[y:y+h, x:x+w, :]
+    return preprocess(face_img)
 
 @app.get("/predict", response_model=PredictionResponse)
 def predict(
@@ -102,12 +104,10 @@ def predict(
     try:
         with torch.no_grad():
             if video_url:
-                # Download video
                 video_path = "temp_video.mp4"
                 r = requests.get(video_url)
                 with open(video_path, "wb") as f:
                     f.write(r.content)
-                # Extract up to 20 faces from frames
                 vidObj = cv2.VideoCapture(video_path)
                 frames = []
                 count = 20
@@ -119,19 +119,18 @@ def predict(
                     success, frame = vidObj.read()
                     if not success:
                         continue
-                    faces = face_recognition.face_locations(frame)
-                    if faces:
-                        try:
-                            top, right, bottom, left = faces[0]
-                            face_img = frame[top:bottom, left:right, :]
-                        except:
-                            face_img = last_face if last_face is not None else None
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4)
+                    if len(faces) > 0:
+                        x, y, w, h = faces[0]
+                        face_img = frame[y:y+h, x:x+w, :]
+                        face_img = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
+                        last_face = face_img
                     else:
                         face_img = last_face if last_face is not None else None
                     if face_img is not None:
                         face_tensor = preprocess(face_img)
                         frames.append(face_tensor)
-                        last_face = face_img
                 vidObj.release()
                 os.remove(video_path)
                 if len(frames) == 0:
@@ -145,7 +144,6 @@ def predict(
                 face_tensor = extract_face_from_image(img)
                 if face_tensor is None:
                     return JSONResponse(status_code=400, content={"prediction": "error", "confidence": 0.0, "detail": "No face found in image."})
-                # Repeat to fill sequence length (20)
                 input_tensor = torch.stack([face_tensor for _ in range(20)]).unsqueeze(0).to(device)
             else:
                 return JSONResponse(status_code=400, content={"prediction": "error", "confidence": 0.0, "detail": "No image_url or video_url provided."})
